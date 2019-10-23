@@ -1,13 +1,18 @@
-// https://gist.github.com/ayende/21afee6348c1be6a77c1b3fc2e9c1fb1
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <string>
 #include <openssl/ssl.h>
 #include <openssl/err.h>
 #include <uv.h>
 
 #define DEFAULT_PORT 7000
 #define DEFAULT_BACKLOG 128
+
+typedef struct {
+    uv_write_t req;
+    uv_buf_t buf;
+} write_req_t;
 
 typedef struct tls_uv_connection_state tls_uv_connection_state_t;
 
@@ -40,16 +45,19 @@ typedef struct tls_uv_connection_state {
     } pending;
 } tls_uv_connection_state_t;
 
-uv_buf_t alloc_buffer(uv_handle_t *handle, size_t suggested_size) {
-    uv_buf_t buf = uv_buf_init(malloc(suggested_size), suggested_size);
-    return buf;
+void alloc_buffer(uv_handle_t *handle, size_t suggested_size, uv_buf_t *buf) {
+    std::puts(__PRETTY_FUNCTION__);
+    buf->base = (char*)malloc(suggested_size);
+    buf->len = suggested_size;
 }
 
 void report_connection_failure(int status) {
-    fprintf(stderr, "New connection error\n");
+    std::puts(__PRETTY_FUNCTION__);
+    fprintf(stderr, "New connection error %s\n", uv_strerror(status));
 }
 
 void remove_connection_from_queue(tls_uv_connection_state_t* cur) {
+    std::puts(__PRETTY_FUNCTION__);
     if (cur->pending.pending_writes_buffer != NULL) {
         free(cur->pending.pending_writes_buffer);
     }
@@ -61,6 +69,7 @@ void remove_connection_from_queue(tls_uv_connection_state_t* cur) {
 }
 
 void abort_connection_on_error(tls_uv_connection_state_t* state) {
+    std::puts(__PRETTY_FUNCTION__);
     uv_close((uv_handle_t*)state->handle, NULL);
     SSL_free(state->ssl);
     // implicitly freed by SSL_free
@@ -72,6 +81,7 @@ void abort_connection_on_error(tls_uv_connection_state_t* state) {
 
 
 void maybe_flush_ssl(tls_uv_connection_state_t* state) {
+    std::puts(__PRETTY_FUNCTION__);
     if (state->pending.in_queue)
         return;
     if (BIO_pending(state->write) == 0 && state->pending.pending_writes_count > 0)
@@ -86,13 +96,15 @@ void maybe_flush_ssl(tls_uv_connection_state_t* state) {
     state->server->pending_writes = state;
 }
 
-void handle_read(uv_stream_t *client, ssize_t nread, uv_buf_t buf) {
-    tls_uv_connection_state_t* state = client->data;
+void handle_read(uv_stream_t *client, ssize_t nread, const uv_buf_t *buf) {
+    std::puts(__PRETTY_FUNCTION__);
+    auto* state = static_cast<tls_uv_connection_state_t *>(client->data);
 
-    BIO_write(state->read, buf.base, nread);
+    BIO_write(state->read, buf->base, nread);
     while (1)
     {
-        int rc = SSL_read(state->ssl, buf.base, buf.len);
+        int rc = SSL_read(state->ssl, buf->base, buf->len);
+        std::printf("rc: %d\n", rc);
         if (rc <= 0) {
             rc = SSL_get_error(state->ssl, rc);
             if (rc != SSL_ERROR_WANT_READ) {
@@ -104,42 +116,59 @@ void handle_read(uv_stream_t *client, ssize_t nread, uv_buf_t buf) {
             // need to read more, we'll let libuv handle this
             break;
         }
-        if (state->server->protocol.read(state, buf.base, rc) == 0) {
+        if (state->server->protocol.read(state, buf->base, rc) == 0) {
             // protocol asked to close the socket
             abort_connection_on_error(state);
             break;
         }
     }
 
-    free(buf.base);
+    if (buf->base)
+        free(buf->base);
 }
 
 void complete_write(uv_write_t* req, int status) {
-    tls_uv_connection_state_t* state = req->data;
-    free(req);
+    std::puts(__PRETTY_FUNCTION__);
+    write_req_t* wr;
+    wr = (write_req_t*) req;
+
+    auto* state = static_cast<tls_uv_connection_state_t *>(wr->req.data);
+
+    char * const str = static_cast<char *const>(wr->buf.base);
+    if (std::string(str).find("{}") != std::string::npos)
+    {
+        if (!uv_is_closing(reinterpret_cast<const uv_handle_t *>(state->handle)))
+        {
+            uv_close(reinterpret_cast<uv_handle_t *>(state->handle), reinterpret_cast<uv_close_cb>(free));
+        }
+    }
 
     if (status < 0) {
         state->server->protocol.connection_closed(state, status);
         abort_connection_on_error(state);
     }
+
+    /* Free the read/write buffer and the request */
+    free(wr->buf.base);
+    free(wr);
 }
 
 void flush_ssl_buffer(tls_uv_connection_state_t* cur) {
+    std::puts(__PRETTY_FUNCTION__);
     int rc = BIO_pending(cur->write);
     if (rc > 0) {
-        void *const base = malloc(rc);
-        uv_buf_t buf = uv_buf_init(base, rc);
-        BIO_read(cur->write, buf.base, rc);
-        uv_write_t* req = calloc(1, sizeof(uv_write_t));
-        req->data = cur;
-        uv_write(req, (uv_stream_t*)cur->handle, &buf, 1, complete_write);
-        free(base);
+        write_req_t *wr = (write_req_t*) malloc(sizeof(write_req_t));
+        wr->buf = uv_buf_init((char *)malloc(rc), rc);
+        BIO_read(cur->write, wr->buf.base, rc);
+        wr->req.data = cur;
+        uv_write(&wr->req, (uv_stream_t*)cur->handle, &wr->buf, 1, complete_write);
     }
 }
 
 
 void try_flush_ssl_state(uv_handle_t * handle) {
-    tls_uv_server_state_t* server_state = handle->data;
+    std::puts(__PRETTY_FUNCTION__);
+    auto* server_state = static_cast<tls_uv_server_state_t *>(handle->data);
     tls_uv_connection_state_t** head = &server_state->pending_writes;
 
     while (*head != NULL) {
@@ -172,9 +201,7 @@ void try_flush_ssl_state(uv_handle_t * handle) {
             }
             if (rc != SSL_ERROR_WANT_READ) {
                 server_state->protocol.connection_closed(cur, rc);
-
                 abort_connection_on_error(cur);
-                cur->pending.in_queue = 0;
                 break;
             }
             // we are waiting for reads from the network
@@ -197,14 +224,17 @@ void try_flush_ssl_state(uv_handle_t * handle) {
     }
 }
 
-void prepare_if_need_to_flush_ssl_state(uv_prepare_t * handle, int status) {
+void prepare_if_need_to_flush_ssl_state(uv_prepare_t * handle) {
+    std::puts(__PRETTY_FUNCTION__);
     try_flush_ssl_state((uv_handle_t*)handle);
 }
-void check_if_need_to_flush_ssl_state(uv_check_t * handle, int status) {
+void check_if_need_to_flush_ssl_state(uv_check_t * handle) {
+    std::puts(__PRETTY_FUNCTION__);
     try_flush_ssl_state((uv_handle_t*)handle);
 }
 
 int connection_write(tls_uv_connection_state_t* state, void* buf, int size) {
+    std::puts(__PRETTY_FUNCTION__);
     int rc = SSL_write(state->ssl, buf, size);
     if (rc > 0)
     {
@@ -228,11 +258,12 @@ int connection_write(tls_uv_connection_state_t* state, void* buf, int size) {
 
     // we need to re negotiate with the client, so we can't accept the write yet
     // we'll copy it to the side for now and retry after the next read
-    uv_buf_t copy = uv_buf_init(malloc(size), size);
+    uv_buf_t copy = uv_buf_init((char*) malloc(size), size);
     memcpy(copy.base, buf, size);
     state->pending.pending_writes_count++;
-    state->pending.pending_writes_buffer = realloc(state->pending.pending_writes_buffer,
-                                                   sizeof(uv_buf_t) * state->pending.pending_writes_count);
+    state->pending.pending_writes_buffer = static_cast<uv_buf_t *>(realloc(state->pending.pending_writes_buffer,
+                                                                           sizeof(uv_buf_t) *
+                                                                           state->pending.pending_writes_count));
 
     state->pending.pending_writes_buffer[state->pending.pending_writes_count - 1] = copy;
 
@@ -242,17 +273,18 @@ int connection_write(tls_uv_connection_state_t* state, void* buf, int size) {
 }
 
 void on_new_connection(uv_stream_t *server, int status) {
+    std::puts(__PRETTY_FUNCTION__);
     if (status < 0) {
         report_connection_failure(status);
         return;
     }
-    tls_uv_server_state_t* server_state = server->data;
+    auto* server_state = static_cast<tls_uv_server_state_t *>(server->data);
 
-    uv_tcp_t *client = (uv_tcp_t*)malloc(sizeof(uv_tcp_t));
+    auto *client = static_cast<uv_tcp_t *>(malloc(sizeof(uv_tcp_t)));
     uv_tcp_init(server_state->loop, client);
     status = uv_accept(server, (uv_stream_t*)client);
     if (status != 0) {
-        uv_close((uv_handle_t*)client, NULL);
+        uv_close((uv_handle_t*)client, reinterpret_cast<uv_close_cb>(free));
         report_connection_failure(status);
         return;
     }
@@ -279,20 +311,25 @@ void on_new_connection(uv_stream_t *server, int status) {
 }
 
 tls_uv_connection_state_t* on_create_connection(uv_tcp_t* connection) {
-    return calloc(1, sizeof(tls_uv_connection_state_t));
+    std::puts(__PRETTY_FUNCTION__);
+    return static_cast<tls_uv_connection_state_t *>(calloc(1, sizeof(tls_uv_connection_state_t)));
 }
 int on_connection_established(tls_uv_connection_state_t* connection) {
-    return connection_write(connection, "OK\r\n", 4);
+    std::puts(__PRETTY_FUNCTION__);
+    return connection_write(connection, (void *) "OK\r\n", 4);
 }
 
 void on_connection_closed(tls_uv_connection_state_t* connection, int status) {
+    std::puts(__PRETTY_FUNCTION__);
     report_connection_failure(status);
 }
 int on_read(tls_uv_connection_state_t* connection, void* buf, ssize_t nread) {
+    std::puts(__PRETTY_FUNCTION__);
     return connection_write(connection, buf, nread);
 }
 
 int main() {
+    std::puts(__PRETTY_FUNCTION__);
     char * cert = "/home/fiorentinoing/devel/libuv_tls/agent.pem";
     char * key = "/home/fiorentinoing/devel/libuv_tls/key.pem";
     SSL_load_error_strings();
@@ -317,27 +354,26 @@ int main() {
 
     uv_loop_t* loop = uv_default_loop();
 
-    tls_uv_server_state_t server_state = {
-            .ctx = ctx,
-            .loop = loop,
-            .protocol = {
-                    .create_connection = on_create_connection,
-                    .connection_closed = on_connection_closed,
-                    .read = on_read,
-                    .connection_established = on_connection_established
-            }
-    };
+    tls_uv_server_state_t server_state;
+    server_state.ctx = ctx;
+    server_state.loop = loop;
+    server_state.protocol.create_connection = on_create_connection;
+    server_state.protocol.connection_closed = on_connection_closed;
+    server_state.protocol.read = on_read;
+    server_state.protocol.connection_established = on_connection_established;
+    server_state.pending_writes = NULL;
 
     uv_tcp_t server;
     uv_tcp_init(loop, &server);
     server.data = &server_state;
 
-    struct sockaddr_in addr = uv_ip4_addr("0.0.0.0", DEFAULT_PORT);
+    struct sockaddr_in addr;
+    uv_ip4_addr("0.0.0.0", DEFAULT_PORT, &addr);
 
-    uv_tcp_bind(&server, addr);
+    uv_tcp_bind(&server, (const struct sockaddr*)&addr, 0);
     int r = uv_listen((uv_stream_t*)&server, DEFAULT_BACKLOG, on_new_connection);
     if (r) {
-        fprintf(stderr, "Listen error\n");
+        fprintf(stderr, "Listen error %s\n", uv_strerror(r));
         return 1;
     }
     uv_prepare_t before_io;
