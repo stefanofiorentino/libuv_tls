@@ -37,6 +37,8 @@ set(THREADS_PREFER_PTHREAD_FLAG ON)
 
 include(FindThreads)
 
+include_directories(${CMAKE_CURRENT_SOURCE_DIR})
+
 if(BUILD_TESTING)
     set(BUILD_TESTING OFF)
 

@@ -9,6 +9,9 @@
 #define DEFAULT_PORT 7000
 #define DEFAULT_BACKLOG 128
 
+#include "include/json_utils.hpp"
+#include "include/all_dto.hpp"
+
 typedef struct {
     uv_write_t req;
     uv_buf_t buf;
@@ -44,6 +47,8 @@ typedef struct tls_uv_connection_state {
         uv_buf_t* pending_writes_buffer;
     } pending;
 } tls_uv_connection_state_t;
+
+int get_generic_error(tls_uv_connection_state_t *connection);
 
 void alloc_buffer(uv_handle_t *handle, size_t suggested_size, uv_buf_t *buf) {
     std::puts(__PRETTY_FUNCTION__);
@@ -331,7 +336,28 @@ void on_connection_closed(tls_uv_connection_state_t* connection, int status) {
 }
 int on_read(tls_uv_connection_state_t* connection, void* buf, ssize_t nread) {
     std::puts(__PRETTY_FUNCTION__);
+    std::string incoming_message = std::string{static_cast<char*>(buf), static_cast<size_t>(nread)};
+    Json::Value jsonValue = getJsonValueFromString(incoming_message);
+    if (jsonValue.empty())
+    {
+        return get_generic_error(connection);
+    }
+    if (!jsonValue.isMember("method"))
+    {
+        return get_generic_error(connection);
+    }
     return connection_write(connection, buf, nread);
+}
+
+int get_generic_error(tls_uv_connection_state_t *connection)
+{
+    auto value = generic_error{}.toJsonValue();
+    std::string generic_error_string;
+    generic_error_string += "HTTP/1.1 200 OK\r\n";
+    generic_error_string += "Content-Type: text/html\r\n";
+    generic_error_string += "Content-Length: " + std::to_string(value.toStyledString().length()) + "\r\n";
+    generic_error_string += value.toStyledString();
+    return connection_write(connection, (void *) generic_error_string.c_str(), generic_error_string.length());
 }
 
 int main() {
