@@ -211,6 +211,7 @@ void try_flush_ssl_state(uv_handle_t * handle) {
             head = &cur->pending.next;
             break;
         }
+
         flush_ssl_buffer(cur);
         if (used == cur->pending.pending_writes_count) {
             remove_connection_from_queue(cur);
@@ -233,7 +234,8 @@ void check_if_need_to_flush_ssl_state(uv_check_t * handle) {
     try_flush_ssl_state((uv_handle_t*)handle);
 }
 
-int connection_write(tls_uv_connection_state_t* state, void* buf, int size) {
+int connection_write(tls_uv_connection_state_t* state, void* buf, int size)
+{
     std::puts(__PRETTY_FUNCTION__);
     int rc = SSL_write(state->ssl, buf, size);
     if (rc > 0)
@@ -243,31 +245,35 @@ int connection_write(tls_uv_connection_state_t* state, void* buf, int size) {
     }
 
     rc = SSL_get_error(state->ssl, rc);
-    if (rc == SSL_ERROR_WANT_WRITE) {
+    if (rc == SSL_ERROR_WANT_WRITE)
+    {
         flush_ssl_buffer(state);
         rc = SSL_write(state->ssl, buf, size);
         if (rc > 0)
             return 1;
     }
 
-    if (rc != SSL_ERROR_WANT_READ) {
+    if (rc != SSL_ERROR_WANT_READ)
+    {
         state->server->protocol.connection_closed(state, rc);
         abort_connection_on_error(state);
         return 0;
     }
 
-    // we need to re negotiate with the client, so we can't accept the write yet
-    // we'll copy it to the side for now and retry after the next read
-    uv_buf_t copy = uv_buf_init((char*) malloc(size), size);
-    memcpy(copy.base, buf, size);
-    state->pending.pending_writes_count++;
-    state->pending.pending_writes_buffer = static_cast<uv_buf_t *>(realloc(state->pending.pending_writes_buffer,
-                                                                           sizeof(uv_buf_t) *
-                                                                           state->pending.pending_writes_count));
+    if (buf)
+    {
+        // we need to re negotiate with the client, so we can't accept the write yet
+        // we'll copy it to the side for now and retry after the next read
+        uv_buf_t copy = uv_buf_init((char *) malloc(size), size);
+        memcpy(copy.base, buf, size);
+        state->pending.pending_writes_count++;
+        state->pending.pending_writes_buffer = static_cast<uv_buf_t *>(realloc(state->pending.pending_writes_buffer,
+                                                                               sizeof(uv_buf_t) *
+                                                                               state->pending.pending_writes_count));
 
-    state->pending.pending_writes_buffer[state->pending.pending_writes_count - 1] = copy;
-
-    maybe_flush_ssl(state);
+        state->pending.pending_writes_buffer[state->pending.pending_writes_count - 1] = copy;
+        maybe_flush_ssl(state);
+    }
 
     return 1;
 }
@@ -316,7 +322,7 @@ tls_uv_connection_state_t* on_create_connection(uv_tcp_t* connection) {
 }
 int on_connection_established(tls_uv_connection_state_t* connection) {
     std::puts(__PRETTY_FUNCTION__);
-    return connection_write(connection, (void *) "OK\r\n", 4);
+    return connection_write(connection, NULL, 0);
 }
 
 void on_connection_closed(tls_uv_connection_state_t* connection, int status) {
